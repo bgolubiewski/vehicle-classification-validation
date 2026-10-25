@@ -1,0 +1,1045 @@
+---
+title: "Porównawcza ocena modeli klasyfikacyjnych"
+subtitle: "Ocena wpływu strategii walidacji — walidacji krzyżowej, bootstrapu i podziału na zbiór treningowy i testowy — na zbiorze Vehicle z pakietu mlbench"
+author: 'Bartosz Golubiewski, Kajetan Marszałek'
+date: "`r Sys.Date()`"
+output: 
+  bookdown::pdf_document2:
+    dev: cairo_pdf
+    toc: true
+    fig_caption: yes
+    fig_width: 5 
+    fig_height: 4 
+    number_sections: true
+header-includes:
+   - \usepackage[OT4]{polski}
+   - \usepackage[utf8]{inputenc}
+   - \usepackage{graphicx}
+   - \usepackage{float}
+fontsize: 12pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, dev.args = list(png = list(type = "cairo")))
+
+# zbiory danych
+library(mlbench)
+
+# metody klasyfikacji
+library(arules)
+library(cluster)
+library(class) # knn()
+library(ipred) # cross-validation, bootstrap
+library(rpart) # drzewa klasyfikacyjne
+library(rpart.plot)
+library(e1071) # bayes
+library(randomForest)
+library(adabag)
+
+# narzedzia pomocnicze
+library(patchwork)
+library(here)
+
+# tabele
+library(knitr)
+library(kableExtra)
+
+# obróbka danych
+library(tidyr)
+library(dplyr)
+library(DataExplorer)
+library(ggplot2)
+
+source(here("R", "01_data_preparation.R"))
+source(here("R", "02_knn.R"))
+source(here("R", "03_classification_tree.R"))
+source(here("R", "04_naive_bayes.R"))
+source(here("R", "05_bagging.R"))
+source(here("R", "06_adaboost.R"))
+source(here("R", "07_random_forest.R"))
+source(here("R", "08_svm.R"))
+source(here("R", "09_summary.R"))
+```
+
+# Wstęp
+
+Celem projektu jest porównanie wybranych modeli uczenia nadzorowanego oraz ocena wpływu zastosowanej metody walidacji na uzyskiwane wyniki. Analiza obejmuje walidację krzyżową (*Cross-Validation*), metodę *Bootstrap* oraz pojedynczy podział danych na zbiór treningowy i testowy. Badania przeprowadzono na zbiorze **Vehicle** z pakietu `mlbench`, który zawiera dane dotyczące sylwetek pojazdów. Porównanie pozwala ocenić skuteczność poszczególnych modeli oraz przydatność analizowanych strategii walidacji w ocenie jakości klasyfikacji.
+
+# Opis danych
+
+W niniejszym projekcie użyto zbioru danych **Vehicle** z pakietu `mlbench`. Jest to pomniejszona wersja zbioru stworzonego w latach 1986--87 przez Barry'ego Shepherda oraz Pete'a Mowfortha. Szczegółowe dotyczące danych można znaleźć na stronie repozytorium UCI --- *[Statlog (Vehicle Silhouettes) Dataset](http://archive.ics.uci.edu/dataset/149/statlog+vehicle+silhouettes)*. 
+
+Zbiór zawiera informacje dotyczące **`r nrow(Vehicle)`** pojazdów, podzielone na **`r ncol(Vehicle)`** atrybutów. Wśród nich 18 zmiennych (typu `numeric`) opisujących geometryczne cechy pojazdów:
+
+
+* `Comp` (*compactness*) --- zwartość obiektu
+
+* `Circ`(*circularity*) --- kolistość
+
+* `D.Circ` (*distance circularity*) --- kolistość oparta na odległości od krawędzi
+
+* `Rad.Ra` (*radius ratio*) --- stosunek promieni
+
+* `Pr.Axis.Ra` (*principal axis aspect ratio*) --- proporcja osi głównych
+
+* `Max.L.Ra` (*maximum length aspect ratio*) --- proporcja maksymalnej długości
+
+* `Scat.Ra` (*scatter ratio*) --- stosunek rozproszenia
+
+* `Elong` (*elongatedness*) --- wydłużenie
+
+* `Pr.Axis.Rect` (*principal axis rectangularity*) --- prostokątność względem osi głównych
+
+* `Max.L.Rect` (*maximum length rectangularity*) --- prostokątność względem maksymalnej długości
+
+* `Sc.Var.Maxis` (*scaled variance along major axis*) --- znormalizowana wariancja względem osi głównej
+
+* `Sc.Var.maxis` (*scaled variance along minor axis*) --- znormalizowana wariancja względem osi pomocniczej
+
+* `Ra.Gyr` (*scaled radius of gyration*) --- znormalizowany promień bezwładności
+
+* `Skew.Maxis` (*skewness about major axis*) --- skośność względem osi głównej
+
+* `Skew.maxis` (*skewness about minor axis*) --- skośność względem osi pomocniczej
+
+* `Kurt.maxis` (*kurtosis about minor axis*) --- kurtoza względem osi pomocniczej
+
+* `Kurt.Maxis` (*kurtosis about major axis*) --- kurtoza względem osi głównej
+
+* `Holl.Ra` (*hollows ratio*) --- współczynnik pustych przestrzeni
+
+
+oraz zmienną `Class` (typu `factor`) opisującą rodzaj pojazdu (`OPEL`, `SAAB`, `BUS`, `VAN`). Jest to zmienna zawierająca etkietki klas.
+
+Zbiór nie zawiera braków danych.
+
+## Rozkład klas
+
+```{r, tabela-rozklad-klas}
+
+rozklad_klas_df <- as.data.frame(100 * prop.table(table(Vehicle$Class)))
+
+kable(rozklad_klas_df,
+      caption = 'Udział procentowy danej klasy w danych',
+      col.names = c('Klasa', 'Udział w danych'),
+      align = 'c',
+      digits = 2,
+      row.names = FALSE,
+      booktabs = TRUE) %>%
+   kable_styling(
+      position = 'center',
+      latex_options = c('hold_position', 'striped')) %>%
+   row_spec(0, bold=TRUE)
+
+```
+
+W tabeli \@ref(tab:tabela-rozklad-klas) przedstawiono procentowy udział poszczególnych klas pojazdów w analizowanym zbiorze danych. Można zauważyć, że rozkład klas jest stosunkowo równomierny --- każda z klas stanowi około 25\% wszystkich obserwacji. Jedynie klasa `Van` występuje nieznacznie rzadziej od pozostałych.
+
+Gdyby wszystkie obserwacje zostały przypisane wyłącznie do najczęściej występującej klasy (`Bus`), błąd klasyfikacji, rozumiany jako odsetek błędnie sklasyfikowanych obiektów, wyniósłby około `r round(1 - max(table(Vehicle$Class)) / nrow(Vehicle), 2)`.
+
+## Zmienność atrybutów {#zmiennosc-atr}
+
+Na rysunku \@ref(fig:wykres-boxplot-atrybuty) przedstawiono wykresy pudełkowe zmiennych ilościowych. Widać wyraźne różnice w ich skali oraz zróżnicowaniu. Na przykład `Sc.Var.maxis` przyjmuje wartości z przedziału `r min(Vehicle$Sc.Var.maxis)`--`r max(Vehicle$Sc.Var.maxis)`, natomiast `Skew.maxis` obejmuje wartości od `r min(Vehicle$Skew.maxis)` do `r max(Vehicle$Skew.maxis)`. Na wykresach widoczne są również obserwacje odstające.
+
+Tak duże różnice w rozrzucie cech wskazują na potrzebę standaryzacji przed zastosowaniem algorytmów klasyfikacyjnych, które są wrażliwe na skalę zmiennych.
+
+```{r, wykres-boxplot-atrybuty, fig.height=4, fig.cap = 'Wykresy pudełkowe zmiennych ilościowych'}
+
+dane_do_boxplot <- Vehicle %>%
+  pivot_longer(cols = -Class,
+               names_to = "zmienna",
+               values_to = "wartosc")
+
+ggplot(dane_do_boxplot, aes(x=wartosc, y=zmienna)) +
+  geom_boxplot(fill = "skyblue",
+              color = "black",
+              alpha = 0.7,
+              outlier.size = 1.5) +
+  labs(title = "Wykresy pudełkowe poszczególnych zmiennych", y = NULL, x = 'Wartość') +
+  theme_light() +
+  theme(plot.margin = ggplot2::margin(t = 10, r = 15, b = 20, l = 15),
+        plot.title = element_text(size=11, face = 'bold'),
+        axis.text.x = element_text(size=10, margin = margin(t=8)),
+        axis.title = element_text(size=10)) 
+
+```
+
+## Zdolność dyskryminacyjna {#zdolnosc-dyskr}
+
+Na podstawie analizy estymatorów gęstości można stwierdzić, że u wszystkich zmiennych obserwuje się silne nakładanie rozkładów. Jednak niektóre zmienne wykazują lepsze zdolności dyskryminacyjne. W szczególności są to cechy `Scat.Ra`, `Elong` oraz `D.Circ`, których wykresy estymatorów gęstości przedstawiono na rysunku \@ref(fig:estymatory-wybranych-cech). Zmienne te pozwalają na częściowe rozdzielenie klas pojazdów.
+
+```{r, estymatory-gestosc-wszystkich-cech, include=FALSE}
+
+# wykresy do analizy, nie do raportu
+ggplot(dane_do_boxplot,
+       aes(x = wartosc, fill = Class, color = Class)) +
+  geom_density(alpha = 0.2) +
+  facet_wrap(~ zmienna, scales = "free") +
+  theme_light()
+
+```
+
+```{r, estymatory-wybranych-cech, fig.height=5, fig.cap='Estymatory gęstość wybranych zmiennych w zależności od zmiennej `Class`'}
+
+rysuj_gestosc <- function(zmienna, title) {
+  ggplot(Vehicle, aes(x = zmienna, color = Class)) +
+    geom_density() +
+    labs(title = title, y = NULL, x = NULL) +
+    theme_light() +
+    scale_color_brewer(palette = 'Set1') +
+    theme(plot.margin = margin(t = 10, r = 15, b = 20, l = 15),
+        plot.title = element_text(size=11, face = 'bold'),
+        axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title = element_text(size=10))
+}
+
+p1 <- rysuj_gestosc(Vehicle$D.Circ, 'Zmienna `D.Circ`')
+p2 <- rysuj_gestosc(Vehicle$Elong, 'Zmienna `Elong`')
+p3 <- rysuj_gestosc(Vehicle$Scat.Ra, 'Zmienna `Scat.Ra`')
+
+p1 / p2/ p3 +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+```
+
+## Przygotowanie danych
+
+  W celu budowy i oceny modeli klasyfikacyjnych zbiór danych podzielono na część uczącą, obejmującą $\frac23$ obserwacji, oraz część testową, zawierającą pozostałą $\frac13$ danych. 
+  
+  Zgodnie z wnioskami przedstawionymi w rozdziale \@ref(zmiennosc-atr), przeprowadzono standaryzację zmiennych. W tym celu na podstawie zbioru uczącego zostały wyznaczone wartości średniej oraz odchylenia standardowego. Uzyskane parametry zastosowano do przeskalowania zarówno zbioru uczącego, jak i testowego.\newline
+  Na potrzeby bardziej zaawansowanych schematów oceny dokładności (*Cross-validation*, *Bootstrap*) przygotowano również globalnie przeskalowaną wersję pełnego zbioru.
+
+  Wszystkie operacje losowe związane z podziałem danych przeprowadzono przy użyciu ustalonego ziarna generatora liczb równego `87124671`.
+
+
+# Metoda k-najbliższych sąsiadów (*k-Nearest Neighbors*)
+## Ocena modeli na podstawie pojedynczego podziału (Train/Test)
+### Metoda k-najbliższych sąsiadów dla pełnego zbioru zmiennych. \newline
+
+Jako pierwszą zastosowano metodę `k`-najbliższych sąsiadów na pełnym zestawie atrybutów. W celu znalezienia optymalnej liczby sąsiadów przetestowano wartości parametru `k` od 1 do 200, wyznaczając błąd klasyfikacji zarówno na zbiorze uczącym, jak i testowym.
+
+W obliczeniach użyto funkcji `knn()` z pakietu `class`.
+
+```{r, wykres-knn-all, fig.cap='Wykres zależności błędu klasyfikacji w zależności od liczby szukanych sąsiadów (k). Model zbudowany na podstawie wszystkich zmiennych.', fig.pos='H'}
+
+df_knn_all_long <- pivot_longer(df_knn_all, cols=c(blad_uczacy, blad_testowy),
+                                names_to = 'Zbior', values_to = 'Blad')
+
+ggplot(df_knn_all_long, aes(x=k, y=Blad, color=Zbior)) + 
+  geom_line(linewidth = 0.8) +
+  scale_color_manual(values=c('blad_uczacy' = 'indianred', 'blad_testowy' = 'skyblue'),
+                     labels=c('blad_uczacy' = 'Uczący', 'blad_testowy' = 'Testowy')) +
+  labs(title = 'Zależność parametru k od błędu klasyfikacji', y = 'Błąd klasyfikacji (%)', x = 'Wartość k', color = 'Zbiór danych') +
+    theme_light() +
+    theme(legend.position = 'bottom')
+
+```
+
+Na rysunku \@ref(fig:wykres-knn-all) przedstawiono zależność błędu klasyfikacji metody od wartości parametru `k`, oznaczającego liczbę uwzględnianych sąsiadów. Procent niepoprawnie przypisanych obserwacji rośnie wraz z wartością parametru `k`. Błąd na zbiorze testowym jest większy od błędu zbioru uczącego. Warto zwrócić uwagę na błąd na zbiorze uczącym dla `k` = 1, który wynosi 0 --- model idealnie zapamiętał dane treningowe, ale gorzej radzi sobie z nowymi przykładami.
+
+Najlepsze wyniki na zbiorze testowym otrzymano dla `k` = `r df_knn_all$k[which.min(df_knn_all$blad_testowy)]`, dla którego odsetek niepoprawnie przypisanych obserwacji wyniósł `r round(min(df_knn_all$blad_testowy), 2)`\%.
+
+Wizualizację macierzy pomyłek dla optymalnego parametru (`k` = `r k_opt_all`) przedstawiono w tabelach \@ref(tab:tabela-all-uczacy) oraz \@ref(tab:tabela-all-testowy). Wartości odsetka błędu wyniosły odpowiednio `r round(round(df_knn_all$blad_uczacy[k_opt_all], 2))`\% dla zbioru uczącego oraz `r round(round(df_knn_all$blad_testowy[k_opt_all], 2))`\% dla zbioru testowego. 
+
+```{r, tabela-all-uczacy}
+
+kable(cm_learn_all,
+      caption = 'Macierz pomyłek dla zbioru uczącego (pełne zmienne)
+      Wiersze --- klasy wyznaczone, kolumny --- klasy rzeczywiste.',
+      align = 'c',
+      booktabs = TRUE) %>%
+   kable_styling(
+      latex_options = c('hold_position', 'striped'))
+  
+```
+
+```{r, tabela-all-testowy}
+
+kable(cm_test_all,
+      caption = 'Macierz pomyłek dla zbioru testowego (pełne zmienne).
+      Wiersze --- klasy wyznaczone, kolumny --- klasy rzeczywiste.',
+      align = 'c',
+      booktabs = TRUE) %>%
+   kable_styling(
+      latex_options = c('hold_position', 'striped'))
+  
+```
+
+Głównym źródłem błędów klasyfikatora są zbliżone cechy geometryczne samochodów osobowych klasy `Opel` oraz `Saab`. W zbiorze testowym aż `r cm_test_all['opel', 'saab']` pojazdów marki Saab zostało błędnie uznane za Ople, z kolei `r cm_test_all['saab', 'opel']` Opli sklasyfikowano jako Saaby.
+
+Natomiast model dobrze radzi sobie z rozpoznawaniem klas `Bus` oraz `Van`, które ze względu na swoje unikalne kształty są niemal bezbłędnie rozróżniane od reszty.
+
+### Metoda k-najbliższych sąsiadów dla zmiennych o najlepszej zdolności dyskryminacyjnej \newline
+
+Tę samą procedurę powtórzono, ograniczając zmienne wyłącznie do tych o dobrej zdolności dyskryminacyjnej --- `Scat.Ra`, `Elong` oraz `D.Circ` (rodział \@ref(zdolnosc-dyskr)). 
+
+```{r, wykres-knn-opt, fig.cap='Wykres zależności błędu klasyfikacji w zależności od liczby szukanych sąsiadów (k). Model zbudowany na podstawie wybranych zmiennych.', fig.pos='H', fig.height=3}
+
+
+df_knn_opt_long <- pivot_longer(df_knn_opt, cols=c(blad_uczacy, blad_testowy),
+                                names_to = 'Zbior', values_to = 'Blad')
+
+ggplot(df_knn_opt_long, aes(x=k, y=Blad, color=Zbior)) + 
+  geom_line(linewidth = 0.8) +
+  scale_color_manual(values=c('blad_uczacy' = 'indianred', 'blad_testowy' = 'skyblue'),
+                     labels=c('blad_uczacy' = 'Uczący', 'blad_testowy' = 'Testowy')) +
+  labs(title = 'Zależność parametru k od błędu klasyfikacji', y = 'Błąd klasyfikacji (%)', x = 'Wartość k', color = 'Zbiór danych') +
+    theme_light() +
+    theme(legend.position = 'bottom')
+
+```
+
+Dla modelu o ograniczonej liczbie cech (Rysunek \@ref(fig:wykres-knn-opt)), minimum błędu na zbiorze testowym osiągnięto dla `k` = `r df_knn_opt$k[which.min(df_knn_opt$blad_testowy)]` z wynikiem `r round(min(df_knn_opt$blad_testowy), 2)`\%.
+
+```{r, tabela-opt-testowy}
+
+kable(cm_test_opt, caption = 'Macierz pomyłek dla zbioru testowego (wybrane 3 cechy). Wiersze --- klasy wyznaczone, kolumny --- klasy rzeczywiste.',
+      align = 'c',
+      booktabs = TRUE) %>%
+   kable_styling(latex_options = c('hold_position', 'striped'))
+
+```
+
+Tabela \@ref(tab:tabela-opt-testowy) prezentuje macierz pomyłek dla zredukowanego podzbioru atrybutów.
+
+Ograniczenie modelu do 3 cech spowodowało wzrost błędu o około 10 punktów procentowych. Analiza tabeli \@ref(tab:tabela-opt-testowy) wskazuje, że pogorszyła się zdolność rozróżniania klas `Opel` oraz `Saab`. 
+
+Co ciekawe, klasyfikacja pojazdów typu `Bu`s oraz `Van` wciąż utrzymuje się na zadowalającym poziomie, co sugeruje, że cechy `Scat.Ra`, `Elong`, `D.Circ` niosą w sobie wystarczającą informację, pozwalającą na rozróżnianie klas wielkogabarytowych.
+
+
+## Zaawansowane schematy oceny dokładności (*Cross-validation* i *Bootstrap*) \newline
+
+```{r, obliczenia-cv-bootstrap-knn}
+
+# zbiorcza ramka danych
+df_res <- data.frame(
+  k = rep(k_zakres, 4),
+  Blad = c(cv_all, boot_all, cv_opt, boot_opt),
+  Metoda = rep(c("10-fold CV", "Bootstrap"), each = length(k_zakres), times = 2),
+  Cechy = rep(c("Pełny zbiór (18)", "Wybrane cechy (3)"), each = length(k_zakres) * 2)
+)
+
+```
+
+```{r, zapisz-wykres-cv-boot, eval = !file.exists("wykres_cv.png")}
+# flaga 'eval = !file.exists("wykres_cv.png")' wywołuje kod tylko
+# jeśli w katalogu roboczym nie ma pliku "wykres_cv.png"
+
+wykres <- ggplot(df_res, aes(x = k, y = Blad, color = Metoda, linetype = Cechy,
+                             group = interaction(Metoda, Cechy))) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 1.5) +
+  scale_color_manual(
+    values = c("10-fold CV" = "skyblue", "Bootstrap" = "indianred"),
+    labels = c("10-fold CV" = "Walidacja krzyżowa", "Bootstrap" = "Bootstrap")) +
+  scale_linetype_manual(
+  values = c("Pełny zbiór (18)" = "solid", "Wybrane cechy (3)" = "dotdash"),
+  labels = c("Pełny zbiór (18)" = "18 zmiennych", "Wybrane cechy (3)" = "3 zmienne")) +
+  labs(x = "Liczba sąsiadów (k)", y = "Błąd klasyfikacji (%)", color = "Metoda", linetype = "Wariant danych") +
+  theme_light() +
+  theme(legend.position = "bottom", legend.box = "vertical", panel.grid.minor = element_blank())
+
+ggsave("wykres_cv.png", wykres, width = 5, height = 4, dpi = 300)
+
+```
+
+```{r, wczytaj-rysuj-wykres-cv, fig.cap='Wykres zależności błędu klasyfikacji w zależności od liczby szukanych sąsiadów (k). Model zbudowany na podstawie walidacji krzyżowej oraz metody *Bootstrap*.'}
+# Wczytanie zapisanego pliku
+knitr::include_graphics("wykres_cv.png")
+```
+
+W tej sekcji zastosowano zaawansowane techniki estymacji błędu: 10-krotną walidację krzyżową (*10-fold Cross-validation*) oraz metodę *Bootstrap* (z 50 powtórzeniami). Obliczenia przeprowadzono na globalnie przeskalowanym zbiorze danych dla zakresu `k` od 1 do 20.
+
+Wykres \@ref(fig:wczytaj-rysuj-wykres-cv) wskazuje na wyższą skuteczność modelu opartego na pełnym zbiorze 18 cech, który osiąga błędy o około 10 punktów procentowych niższe niż wariant uproszczony do 3 cech.
+
+Dla pełnego zestawu zmiennych minimum błędu ($\approx$ `r round(min(df_res$Blad[df_res$Metoda == "10-fold CV"]), 2)`\%) przypada na niską wartość `k` = `r df_res$k[which.min(df_res$Blad[df_res$Metoda == "10-fold CV"])]` przy zastosowaniu walidacji krzyżowej. Dla metody *Bootstrap* minimum błędu to $\approx$ `r round(min(df_res$Blad[df_res$Metoda == "Bootstrap"]), 2)`\% dla `k` = `r df_res$k[which.min(df_res$Blad[df_res$Metoda == "Bootstrap"])]`.
+
+W przypadku ograniczonej przestrzeni cech sytuacja się odwraca --- obie metody dla małych wartości `k` generują najwyższy błąd ($\approx$ `r round(max(df_res$Blad[df_res$Metoda == "10-fold CV"]), 2)`\%), a najlepsze wartości są osiągane dla większych wartości (`k` = 10 dla *CV* oraz k = 12 dla *Bootstrap*). 
+
+Porównanie pokazuje, że *Bootstrap* (linia czerwona) generuje wyższe oceny błędu niż walidacja krzyżowa (linia niebieska). W przypadku modelu opartego o wszyskie zmienne, oba estymatory zaczynają zbiegać się ze sobą dopiero przy wartościach `k` powyżej 15.
+
+## Wnioski --- metoda k-najbliższych sąsiadów \newline
+
+```{r, tabela-podsumowanie-knn}
+
+kable(
+  df_summary_knn_t,
+  caption = "Zestawienie wyników klasyfikacji k-NN",
+  col.names = c("Pełny zbiór (18 cech)", "Wybrane zmienne (3 cechy)"),
+  align = 'c',
+  booktabs = TRUE
+) %>%
+  kable_styling(latex_options = c('hold_position', 'striped'))
+
+```
+
+W tabeli \@ref(tab:tabela-podsumowanie-knn) zestawiono wyniki dokładności klasyfikacji różnych wariantów metody k-najbliższych-sąsiadów.
+
+* Najwyższą dokładnością charakteryzuje się model oparty na pełnym zbiorze cech. Zaawansowane metody estymacji wskazują, że optymalna dla tego zbioru jest mała liczba sąsiadów: `k` = 1 lub `k` = 5.
+
+* Redukcja przestrzeni do trzech zmiennych (`Scat.Ra`, `Elong`, `D.Circ`) upraszcza model obliczeniowo i pozwala zachować dobrą zdolność rozpoznawania pojazdów dużych (`Bus`, `Van`), lecz zwiększa błąd rozróżnienia samochodów osobowych (`Opel`, `Saab`).
+
+* Zaawansowane schematy oceny dokładności potwierdziły, że wyniki uzyskane za pomocą pojedynczego podziału nie były przypadkowe --- błędy z pojedynczego podziału są zbliżone do oszacowań uzyskanych metodami *Cross-validation* oraz *Bootstrap*.
+
+
+# Drzewa klasyfikacyjne (*classification trees*)
+
+W niniejszym rozdziale przeprowadzono ocenę dokładności drzew klasyfikacyjnych przy użyciu pakietu `rpart`.
+
+Analizę przeprowadzono w oparciu o różne zestawy parametrów (drzewa proste, złożone i przycięte) oraz dwa podzbiory zmiennych --- pełny zestaw oraz cechy dobrze dyskryminujące (`Scat.Ra`, `Elong`, `D.Circ`).
+
+Drzewa nie wymagają standaryzacji danych, dlatego operowano na oryginalnych zbiorach uczących i testowych.
+
+## Ocena modeli na podstawie pojedynczego podziału (Train/Test).
+### Drzewa klasyfikacyjne dla pełnego oraz pomniejszonego zbioru zmiennych. \newline
+
+W pierwszej kolejności wyznaczono prognozy oraz błędy klasyfikacji na zbiorze uczącym i testowym dla drzew prostych (parametry domyślne) oraz drzew o celowo zwiększonej złożoności (`cp = 0.005`).
+
+Uzyskane wartości błędów przedstawiają się następująco:
+
+* Wariant pełny (18 cech): Drzewo proste wygenerowało błąd uczący `r round(err_learn_simple_all, 2)`\% oraz testowy `r round(err_test_simple_all, 2)`\%. Dla drzewa złożonego błąd uczący spadł do `r round(err_learn_complex_all, 2)`\%, a błąd testowy obniżył się do poziomu `r round(err_test_complex_all, 2)`\%.
+
+* Wariant zredukowany (3 cechy): Drzewo proste osiągnęło błąd uczący `r round(err_learn_simple_opt, 2)`\% oraz testowy `r round(err_test_simple_opt, 2)`\%. Wersja złożona zredukowała błąd uczący do `r round(err_learn_complex_opt, 2)`\%, pozostawiając błąd testowy na poziomie `r round(err_test_complex_opt, 2)`\%.
+
+
+Spadek błędu na zbiorze testowym po przejściu z parametrów domyślnych do konfiguracji złożonej w obu wariantach danych dowodzi, że bazowe ustawienia pakietu `rpart` nie były idealne.
+
+```{r, wykres-cp-drzewa, fig.cap='Porównanie błędu walidacji z zależności od parametru złożoności CP dla obu wariantów danych.'}
+
+ggplot(df_cp, aes(x = CP, y = xerror, color = Wariant, group = Wariant)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = xerror - xstd, ymax = xerror + xstd), width = 0, alpha = 0.4) +
+  geom_vline(xintercept = cp_opt_all, color = "steelblue", linetype = "dashed", linewidth = 0.8) +
+  geom_vline(xintercept = cp_opt_opt, color = "firebrick", linetype = "dashed", linewidth = 0.8) +
+  scale_x_log10() +
+  scale_color_manual(values = c("Pełny zbiór (18 cech)" = "steelblue", "Wybrane cechy (3 cechy)" = "firebrick")) +
+  labs(x = "Parametr złożoności (CP) - skala logarytmiczna", y = "Błąd walidacyjny", color = "Wariant danych") +
+  theme_light() +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+```
+
+  W celu znalezienia złotego środka między prostotą a dokładnością, przeanalizowano parametr złożoności (`CP`). Parametr ten kontroluje proces przycinania drzewa decyzyjnego – większe wartości $CP$ prowadzą do powstawania prostszych struktur, natomiast mniejsze wartości pozwalają na budowę bardziej rozbudowanych drzew. 
+  
+  Do wyboru ostatecznego modelu wykorzystano regułę jednego błędu standardowego (*1-SE*). Zgodnie z nią, spośród wszystkich analizowanych modeli wybiera się najprostsze drzewo, którego błąd walidacyjny nie przekracza minimalnego zaobserwowanego błędu powiększonego o jedno odchylenie standardowe. Przebieg tego procesu ilustruje wykres \@ref(fig:wykres-cp-drzewa):
+  
+* Krzywa reprezentująca pełny zbiór 18 zmiennych (oznaczona kolorem niebieskim) na całej długości osi złożoności jest położona niżej niż krzywa dla 3 wybranych cech (kolor czerwony). Dowodzi to, że model zasilany kompletem informacji dysponuje znacznie większym potencjałem dobrej klasyfikacji.
+
+* Zastosowanie reguły jednego błędu standardowego pozwoliło na wyznaczenie optymalnych punktów przycięcia, które na wykresie zostały zobrazowane liniami przerywanymi.
+  
+
+Reguła *1-SE* wyznaczyła optymalne parametry przycinania na poziomie `r round(cp_opt_all, 4)` dla pełnego modelu oraz `r round(cp_opt_opt, 4)` dla zredukowanego.
+
+Strukturę zoptymalizowanego drzewa dla pełnego zestawu cech przedstawiono na rysunku \@ref(fig:struktura-drzewo).
+
+```{r, struktura-drzewo, fig.width=10, fig.height=7, fig.cap='Wizualizacja struktury drzewa złożonego po operacji przycięcia.'}
+
+rpart.plot(tree_pruned_all, box.palette = "RdYlGn", shadow.col = "gray", nn = TRUE)
+```
+
+```{r, tabela-macierz-pomylek-drzewo-all}
+
+kable(cm_test_pruned_all, 
+      caption = 'Macierz pomyłek dla optymalnego (przyciętego) drzewa – pełny zbiór cech (zbiór testowy)', 
+      align = 'c', booktabs = TRUE) %>%
+   kable_styling(latex_options = c('hold_position', 'striped'))
+```
+
+  Zdolności klasyfikacyjne ostatecznych, przyciętych modeli na danych testowych zweryfikowano za pomocą macierzy pomyłek (tabele \@ref(tab:tabela-macierz-pomylek-drzewo-all) oraz \@ref(tab:tabela-macierz-pomylek-drzewo-opt)).
+  
+  Błąd klasyfikacji dla modelu opartego na 18 zmiennych ustabilizował się na poziomie `r round(err_pruned_all, 2)`\%. Drzewo to doskonale radzi sobie z identyfikacją klas `Bus` oraz `Van`. Największym wyzwaniem pozostaje rozróżnienie samochodów osobowych marek `Opel` i `Saab`, gdzie model błędnie przypisał aż `r cm_test_pruned_all['opel', 'saab']` pojazdów marki `Saab` jako `Opel`.
+  
+```{r, tabela-macierz-pomylek-drzewo-opt}
+
+kable(cm_test_pruned_opt, 
+      caption = 'Macierz pomyłek dla optymalnego (przyciętego) drzewa – wybrane 3 cechy (zbiór testowy)', 
+      align = 'c', booktabs = TRUE) %>%
+   kable_styling(latex_options = c('hold_position', 'striped'))
+```
+
+  Dla modelu zredukowanego błąd końcowy wzrósł do wartości `r round(err_pruned_opt, 2)`\%. Ograniczenie przestrzeni wejściowej do 3 cech pozbawiło algorytm krytycznych informacji, co --- jak obrazuje tabela \@ref(tab:tabela-macierz-pomylek-drzewo-opt) --- doprowadziło do osłabienia zdolności rozróżniania klas `Opel` oraz `Saab`, drastycznie nasilając losowe pomyłki między nimi.
+
+
+## Zaawansowane schematy oceny dokładności (*Cross-validation* i *Bootstrap*) \newline
+
+Aby uniezależnić ocenę drzew klasyfikacyjnych od losowości pojedynczego podziału na zbiory uczące i testowe, przeprowadzono estymację błędu za pomocą 10-krotnej walidacji krzyżowej oraz metody *Bootstrap* (50 powtórzeń). W obliczeniach użyto drzewa zoptymalizowanego za pomocą wyznaczonych wcześniej parametrów kosztu-złożoności (`CP`).
+
+Wyznaczony błąd klasyfikacyjny wyniósł:
+
+* Dla modelu opartego na 18 zmiennych ---  `r round(cv_tree_all, 2)`\% (*CV*), `r round(boot_tree_all, 2)`\% (*Bootstrap*).
+* Dla modelu uproszczonego --- `r round(cv_tree_opt, 2)`\% (*CV*), `r round(boot_tree_opt, 2)`\% (*Bootstrap*).
+
+## Wnioski --- drzewa klasyfikacyjne \newline
+
+```{r, drzewa-tabela-podsumowanie, fig.pos='H'}
+
+kable(
+  df_tree_summary_t,
+  caption = "Zestawienie ocen błędów klasyfikacji dla zoptymalizowanych drzew",
+  align = 'c',
+  booktabs = TRUE
+) %>%
+  kable_styling(latex_options = c('hold_position', 'striped'))
+
+```
+
+Zbiorcze zestawienie wyników w tabeli \@ref(tab:drzewa-tabela-podsumowanie) pozwala na wysunięcie wniosków:
+
+* Wyniki uzyskiwane za pomocą prostego podziału na zbiór uczący i testowy okazały się stosunkowo (2--4 punkty procentowe) zbliżone do zaawansowanych metod testowania.
+
+* Niezależnie od wybranego sposobu testowania, drzewa oparte na komplecie 18 cech za każdym razem radzą sobie lepiej od modeli celowo uproszczonych (różnica wynosi ok. 4--6 punktów procentowych błędu).
+
+* Mimo optymalnego przycięcia drzew za pomocą reguły *1-SE*, natura popełnianych błędów (widoczna w macierzach pomyłek) pozostała niezmienna. Algorytm dobrze separuje klasy dużych pojazdów. Nierozwiązanym problemem pozostaje nakładanie się cech dla klas `Opel` i `Saab`. 
+
+
+# Klasyfikator Naiwny Bayesa (*Naive Bayes*)
+
+  W niniejszym rozdziale sprawdzono skuteczność *Klasyfikatora Naiwnego Bayesa* przy użyciu pakietu `e1071`. 
+
+Podobnie jak w poprzednich krokach, osobno sprawdzono błędy klasyfikacji dla pełnego zestawu 18 zmiennych oraz zredukowanego podzbioru 3 cech (`Scat.Ra`, `Elong`, `D.Circ`).
+
+W przypadku tej metody zrezygnowano ze wstępnej standaryzacji zmiennych. W przeciwieństwie do metod opartych na odległości geometrycznej, ten model analizuje każdą cechę niezależnie, estymując parametry funkcji gęstości osobno dla każdego wymiaru.
+
+## Ocena modeli na podstawie pojedynczego podziału (Train/Test)
+
+### Klasyfikator Naiwny Bayesa dla pełnego zbioru zmiennych \newline
+
+
+Utworzono model na postawie wszystkich zmiennych i wyznaczono błędy klasyfikacji na zbiorze testowym i uczącym:
+
+* Błąd na zbiorze uczącym wyniósł `r round(err_learn_def_all, 1)`\%,
+* Błąd na zbiorze testowym wyniósł: `r round(err_test_def_all, 1)`\%.
+
+W przypadku *Klasyfikatora Naiwnego Bayesa* błędy na zbiorze uczącym i testowym są zauważalnie większe w porównaniu do wcześniej analizowanych metod.
+
+```{r, tabela-cm-nb-all}
+
+kable(cm_test_nb_all, 
+      caption = 'Macierz pomyłek dla Klasyfikatora Naiwnego Bayesa – pełny zbiór cech', 
+      align = 'c', booktabs = TRUE) %>%
+   kable_styling(latex_options = c('hold_position', 'striped'))
+```
+
+Strukturę pomyłek dla modelu domyślnego na danych testowych przedstawia tabela \@ref(tab:tabela-cm-nb-all).
+Analiza macierzy pomyłek ujawnia słabość tego algorytmu w kontekście zbioru `Vehicle`. Klasyfikator generuje wysoki błąd.
+
+O ile pojazdy klasy `Van` zostały zadowalająco zklasyfikowane, o tyle samochody osobowe (`Opel` oraz `Saab`) oraz pojazdy typu `Bus` są nagminnie błędnie przypisywane do klasy `Van`.
+Wynika to bezpośrednio z „naiwnego” założenia o niezależności zmiennych.
+
+### Klasyfikator Naiwny Bayesa dla zmiennych o najlepszej zdolności dyskryminacyjnej \newline
+
+Identyczną procedurę powtórzono dla podzbioru 3 wybranych zmiennych.
+
+
+Wyniki dla przestrzeni zredukowanej ukształtowały się następująco:
+
+* Błąd na zbiorze uczącym wyniósł  `r round(err_learn_def_opt, 1)`\%,
+
+* Błąd na zbiorze testowym wyniósł `r round(err_test_def_opt, 1)`\%.
+
+Wbrew intuicji związanej z teoretycznymi właściwościami *Klasyfikatora Naiwnego Bayesa*, ograniczenie liczby zmiennych wyraźnie pogorszyło zdolności modelu. Błąd klasyfikacji wzrósł o około 7--9 punktów procentowych.
+
+## Zaawansowane schematy oceny dokładności (*Cross-validation* i *Bootstrap*)
+
+W celu pełnego porównania skuteczności, przeprowadzono estymację błędu za pomocą 10-krotnej walidacji krzyżowej oraz metody *Bootstrap* (50 powtórzeń).
+
+Dla modelu opartego o wszystkie zmienne estymowany błąd wyniósł `r round(cv_nb_all, 2)`\% (*CV*) oraz `r round(boot_nb_all, 2)`\% (*Bootstrap*).
+W przypadku uproszczonego modelu błąd wyniósł `r round(cv_nb_opt, 2)`\% (*CV*) oraz `r round(boot_nb_opt, 2)`\% (*Bootstrap*).
+
+
+## Wnioski - Klasyfikator Naiwny Bayesa
+
+```{r, podsumowanie-nb}
+
+kable(df_nb_summary_t, 
+      caption = "Zestawienie ocen błędów klasyfikacji dla Klasyfikatora Naiwnego Bayesa", 
+      align = 'c', booktabs = TRUE) %>%
+  kable_styling(latex_options = c('hold_position', 'striped'))
+```
+
+
+Zestawienie uzyskanych wyników (tabela \@ref(tab:podsumowanie-nb)) pozwala na sformułowanie następujących wniosków:
+
+* Ograniczenie liczby zmiennych z 18 do 3 pogorszyło zdolności modelu. Niezależnie od sposoby wyznaczenia błędy, wzrósł on o około 7–9 punktów procentowych --- w przypadku walidacji krzyżowej z poziomu 54.37% do 61.23%, a dla pojedynczego podziału aż do 65.60%.
+
+  Choć algorytm cierpi z powodu silnych zależności między cechami, to odrzucenie aż 15 zmiennych pozbawiło model   zbyt dużej ilości informacji. Pozostałe 3 zmienne geometryczne okazały się niewystarczające, by poprawnie       opisać i rozróżnić kształty pojazdów.
+
+* Model zbudowany poprzez pojedynczy podział przyniósł najwyższe wartości błędu (56.38% dla pełnego zbioru i 65.60% dla zredukowanego). 
+Walidacja krzyżowa oraz *Bootstrap* zwróciły wyniki wyraźnie niższe i bardziej optymistyczne (CV odpowiednio: 54.37% i 61.23%; Bootstrap: 54.84% i 61.67%).
+
+* Uzyskane wyniki (błędy przekraczające 54%) potwierdzają, że klasyfikator Naiwny Bayesa okazał się bardzo słabą metodą klasyfikacji w przypadku zbioru `Vehicle` 
+
+
+# Algorytm *Bagging*
+
+Algorytm *Bagging* to technika, która polega na jednoczesnym trenowaniu wielu niezależnych klasyfikatorów --- najczęściej drzew decyzyjnych --- na losowych próbkach pobranych ze zbioru uczącego.
+
+```{r, wykres-parametr-nbagg, fig.pos='H', fig.cap='Porównanie dokładności klasyfikacji algorytmu *Bagging* (dla zbioru testowego) w zależności od liczby drzew (parametr nbagg)'}
+
+# wykres
+ggplot(df_bagging_long, aes(x = B, y = Blad, color = Zmienne)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  scale_color_manual(
+    values = c('all' = 'steelblue', 'opt' = 'firebrick'),
+    labels = c('all' = 'Wszystkie zmienne',
+               'opt' = 'Optymalne zmienne')) +
+  labs(
+    title = 'Wpływ liczby drzew (nbagg) na błąd klasyfikacji',
+    subtitle = 'Błąd wyznaczony na zbiorze testowym',
+    y = 'Błąd klasyfikacji (%)', x = 'Liczba drzew', color = 'Zestaw zmiennych')+
+  theme_light() +
+  theme(
+    legend.position = 'bottom',
+    plot.title = element_text(face = "bold", size = 14))
+
+```
+
+## Optymalizacja parametru `nbagg`
+
+W celu znalezienia optymalnej liczby drzew decyzyjnych (parametr `nbagg`) sprawdzono wartości błędu klasyfikacji na zbiorze testowym dla obu rozważanych wariantów cech. Z uwagi na złożoność obliczeniową, testowano dla wartości $\text{nbagg}\in \{1,3, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100\}$.
+
+Przebieg błędu testowego w zależności od liczby drzew przedstawiono na wykresie \@ref(fig:wykres-parametr-nbagg). Widać wyraźną dysproporcję w dokładności klasyfikacji na korzyść modelu zasilanego pełnym zestawem cech (linia niebieska), który w badanym obszarze przedziale osiąga niższy błąd niż model oparty na trzech wybranych zmiennych (linia czerwona).
+
+Dla pełnego zbioru danych minimum błędu testowego osiągnięto dla wartości `nbagg` = `r nbagg_all_z_wykresu`. W przypadku zbioru ograniczonego, optymalny błąd zanotowano dla `nbagg` = `r nbagg_opt_z_wykresu`.
+
+## Analiza błędu klasyfikacji
+
+Dla wyznaczonych parametrów przeprowadzono dokładniejsze obliczenia --- zarówno dla pojedynczego podziału na zbiory testowy ($\frac23$ danych) i uczący ($\frac13$ danych), jak i przy użyciu  10-krotnej walidacji krzyżowej (*CV*) oraz metody *Bootstrap* (30 powtórzeń). 
+
+
+Wyniki można znaleźć w tabeli \@ref(tab:tabela-bagging). Ich analiza pozwala na sformułowanie następujących wniosków:
+
+* Niezależnie od zastosowanej metody estymacji, model wyszkolony na pełnym zestawie 18 cech osiąga niższe wartości błędu (w przedziale 27.30\% -- 28.72\%) w porównaniu do modelu opartego na 3 cechach (33.87\% -- 39.72\%). Algorytm *Bagging* dobrze radzi sobie z większą liczbą zmiennych, a wcześniejsze ograniczenie zbioru doprowadziło do utraty istotnych informacji.
+
+*  Najniższe oceny błędu uzyskano dzięki 10-krotnej walidacji krzyżowej (27.30\% dla pełnego zbioru). Estymator bootstrapowy dał wyniki nieznacznie wyższe (28.07\% oraz 37.61\%). W obu wariantach danych najwyższą wartość błędu wskazał pojedynczy podział na zbiór uczący i testowy (28.72\% oraz 39.72\%).
+
+
+```{r, tabela-bagging}
+
+kable(df_bagging_summary_t, 
+      caption = "Zestawienie ocen błędów klasyfikacji dla algorytmu bagging", 
+      align = 'c', booktabs = TRUE) %>%
+  kable_styling(latex_options = c('hold_position', 'striped'))
+
+```
+
+# Algorytm *AdaBoost*
+
+```{r, wykres-parametr-boost, fig.pos='H', fig.cap='Porównanie dokładności klasyfikacji algorytmu *AdaBoost* (dla zbioru testowego) w zależności od parametru mfinal'}
+
+ggplot(df_boosting_long, aes(x = mfinal, y = Blad, color = Zmienne)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  scale_color_manual(
+    values = c('all' = 'steelblue', 'opt' = 'firebrick'),
+    labels = c('all' = 'Wszystkie zmienne', 'opt' = 'Optymalne zmienne')
+  ) +
+  labs(
+    title = 'Wpływ liczby drzew (mfinal) na błąd klasyfikacji',
+    subtitle = 'Błąd wyznaczony na zbiorze testowym',
+    y = 'Błąd klasyfikacji (%)', 
+    x = 'Liczba drzew', 
+    color = 'Zestaw zmiennych'
+  ) +
+  theme_light() +
+  theme(
+    legend.position = 'bottom',
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+```
+
+
+Algorytm *Boosting*, a w szczególności jego odmiana *AdaBoost*, reprezentuje odmienne podejście do budowy modeli niż *Bagging*. Zamiast równoległego i niezależnego trenowania drzew, *Boosting* generuje klasyfikatory sekwencyjnie.
+
+## Optymalizacja parametru `mfinal`
+
+W przypadku tego algorytmu kluczowym zadaniem optymalizacyjnym jest zbadanie, jak liczba drzew (parametr `mfinal`) wpływa na błąd na zbiorze testowym.
+W celu wyznaczenia optymalnej wartości tego parametru, przetestowano wartości błędu klasyfikacji dla zestawu wartości $\text{mfinal} \in \{1, 3, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100\}$. Obliczenia zrealizowano zarówno dla pełnego zestawu cech, jak i dla zbioru ograniczonego do 3 zmiennych.
+
+Przebieg błędu przedstawiono na wykresie \@ref(fig:wykres-parametr-boost). Podobnie jak w przypadku algorytmu *Bagging*, dla małych wartości `mfinal` obserwuje się niestabilność błędu, natomiast dla większych wartości błędy się stabilizują.
+
+Dla pełnego zbioru danych (linia niebieska) minimum błędu testowego osiągnięto dla wartości `mfinal` = `r mfinal_all_z_wykresu`. Dla zbioru ograniczonego (linia czerwona) optymalną dokładność zanotowano przy wartości `mfinal` = `r mfinal_opt_z_wykresu`.
+
+## Ranking ważności cech w algorytmie *AdaBoost*
+
+```{r, wykres-waznosc-boosting, fig.pos='H', fig.cap='Zestawienie względnej ważności cech w *AdaBoost*'}
+
+# Tworzymy ramkę danych z ważnością cech z modelu 'boost_all'
+df_importance <- data.frame(
+  Cecha = names(boost_all$importance),
+  Waznosc = boost_all$importance
+)
+
+ggplot(df_importance, aes(x = reorder(Cecha, Waznosc), y = Waznosc)) +
+  geom_bar(stat = "identity", fill = "#16a085", color = "white", width = 0.7) +
+  coord_flip() +
+  labs(
+    title = "Ranking ważności cech w algorytmie AdaBoost",
+    x = "Zmienne objaśniające",
+    y = "Ważność"
+  ) +
+  theme_light() +
+  theme(plot.title = element_text(face = "bold", size = 10),
+        axis.text.x = element_blank())
+
+```
+
+Jedną z zalet algorytmu *AdaBoost* jest możliwość wyznaczenia względnej ważności cech objaśniających (wykres \@ref(fig:wykres-waznosc-boosting)).
+Co istotne, ranking ważności wygenerowany przez *AdaBoost* różni się od wstępnej selekcji opartej na estymatorach gęstości. Zgodnie z nim, wyznaczono nowy zbiór, zawierający jedynie cechy: `Max.L.Ra`, `Pr.Axis.Ra`, `Max.L.Rect`.
+
+## Analiza błędu klasyfikacji
+
+Dla wyznaczonych optymalnych wartości parametru `mfinal` przeprowadzono ocenę zdolności klasyfikacyjnych algorytmu. Porównaniu poddano trzy warianty danych: pełny zbiór (18 cech), wybrane cechy początkowe oraz zestaw trzech cech optymalnych, wytypowanych bezpośrednio z wykresu \@ref(fig:wykres-waznosc-boosting). Wyniki zestawiono w tabeli \@ref(tab:boost-tabela).
+
+```{r, boost-tabela}
+
+kable(df_boost_summary_t, 
+      caption = "Zestawienie ocen błędów klasyfikacji dla algorytmu AdaBoost", 
+      align = 'c', booktabs = TRUE) %>%
+  kable_styling(latex_options = c('hold_position', 'striped', 'scale_down'))
+
+```
+
+* Niezależnie od zastosowanej metody szacowania błędu, model zasilany kompletem 18 zmiennych osiąga zdecydowanie najniższy błąd klasyfikacji, który utrzymuje się na stabilnym poziomie (24.11\% dla pojedynczego podziału, 21.63\% dla *CV* oraz 24.70\% dla *Bootstrap*).
+
+* Ciekawe jest porównanie modeli opartych na zredukowanej przestrzeni cech. W każdym przypadku model oparty na estymatorach gęstości okazał się skuteczniejszy niż ten zbudowany na cechach z wykresu ważności. (pojedynczy podział (39.36\% vs 47.52\%), 10-krotna walidacja krzyżowa (35.85\% vs 46.45\%), *Bootstrap* (34.88\% vs 46.30\% dla gęstości).
+    
+  Zjawisko to wynika ze specyfiki działania *AdaBoost*: wysoka ważność zmiennej w pełnym modelu oznacza, że była ona kluczowa w obecności pozostałych 15 cech. Jednak po odosobnieniu tych 3 zmiennych, utraciły one swoje właściwości. Z kolei estymator gęstości badał cechy pod kątem ich samodzielnej zdolności separacji klas, co sprawiło, że jako odizolowany zbiór sprawdziły się lepiej.
+
+
+# Lasy losowe
+
+```{r, wykres-parametr-rf, fig.pos='H', fig.cap='Porównanie dokładności klasyfikacji algorytmu *Random Forest* (dla zbioru testowego) w zależności od liczby drzew (parametr ntree)'}
+
+ggplot(df_rf_long, aes(x = ntree, y = Blad, color = Zmienne)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  scale_color_manual(
+    values = c('all' = 'steelblue', 'opt' = 'firebrick'),
+    labels = c('all' = 'Wszystkie zmienne', 'opt' = 'Optymalne (est. gęstości)')
+  ) +
+  labs(
+    title = 'Wpływ liczby drzew (ntree) na błąd klasyfikacji',
+    subtitle = 'Błąd wyznaczony na zbiorze testowym',
+    y = 'Błąd klasyfikacji (%)', 
+    x = 'Liczba drzew (ntree)', 
+    color = 'Zestaw zmiennych'
+  ) +
+  theme_light() +
+  theme(
+    legend.position = 'bottom',
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+```
+
+Lasy losowe (*Random Forest*) stanowią rozwinięcie idei algorytmu *Bagging*. Lasy wprowadzają jednak kluczową modyfikację mającą na celu zmniejszenie powiązania budowanych klasyfikatorów. W każdym węźle każdego drzewa proces poszukiwania optymalnego podziału nie odbywa się w oparciu o pełną przestrzeń cech, lecz na losowo wybranym podzbiorze zmiennych (parametr `mtry`, domyślnie równy pierwiastkowi z liczby wszystkich cech). 
+
+## Optymalizacja parametru `ntree`
+
+W kontekście optymalizacji tego modelu kluczowe jest określenie optymalnej wielkości lasu za pomocą liczby drzew (parametr `ntree`).
+
+W celu odnalezienia optymalnej wartości `ntree`, zbadano wartości błędu klasyfikacji na zbiorze testowym w zależności od liczby wygenerowanych drzew decyzyjnych. Obliczenia przeprowadzono dla wartości $\text{ntree} \in \{1, 3, 5, 10, 15, 20, 25, 30, 40, 50, 75, 100\}$, analizując równolegle model zbudowany na pełnym zestawie cech oraz podzbiorze 3 zmiennych dobrze dyskryminujących.
+
+Przebieg błędu testowego w zależności od liczby drzew przedstawiono na wykresie \@ref(fig:wykres-parametr-rf). Dla małej liczby drzew (przedział $\text{ntree} < 20$) obie linie wykazują silne wahania, dla większych wartości się stabilizują. Po przekroczeniu granicy około 40–50 drzew obie krzywe błędu wyraźnie się wygładzają
+
+Dla pełnego zestawu 18 zmiennych (linia niebieska) minimum błędu testowego osiągnięto dla wartości `ntree` = `r ntree_all_z_wykresu`. W przypadku zbioru ograniczonego (linia czerwona) optymalny punkt pracy algorytmu odnotowano dla wartości `ntree` = `r ntree_opt_z_wykresu`.
+
+## Ranking ważności cech w algorytmie *Random Forest*
+
+```{r, wykres-waznosc-rf, fig.pos='H', fig.cap='Zestawienie względnej ważności cech w metodzie *Random Forest*'}
+
+df_rf_importance <- data.frame(
+  Cecha = rownames(randomForest::importance(rf_all)),
+  Waznosc = randomForest::importance(rf_all)[, "MeanDecreaseGini"]
+)
+
+ggplot(df_rf_importance, aes(x = reorder(Cecha, Waznosc), y = Waznosc)) +
+  geom_bar(stat = "identity", fill = "#16a085", color = "white", width = 0.7) +
+  coord_flip() +
+  labs(
+    title = "Ranking ważności cech (Random Forest)",
+    x = "Zmienne objaśniające",
+    y = "Ważność"
+  ) +
+  theme_light() +
+  theme(plot.title = element_text(face = "bold", size=10),
+        axis.text.x = element_blank())
+
+```
+
+Algorytm *Random Forest* również umożliwia wyznaczenie względnej ważności cech objaśniających. Na wykresie \@ref(fig:wykres-waznosc-rf) przedstawiono ten ranking.
+Stworzono dedykowany podzbior cech optymalnych dla *Random Forest*, zawierający trzy najlepsze zmienne z tego wykresu --- `Max.L.Ra`, `Sc.Var.Maxis`, `Sc.Var.maxis`. Wybór ten pozwala sprawdzić, czy w tym przypadku cechy wybrane przez algorytm radzą sobie lepiej w zredukowanej przestrzeni niż cechy wyselekcjonowane za pomocą estymatorów gęstości.
+
+## Analiza błędu klasyfikacji
+
+```{r, rf-tabela}
+
+df_rf_summary <- data.frame(
+  Zestaw_cech = c("Pełny zbiór (18 cech)", "Wybrane cechy (wg estymatorów gęstości)", "Optymalne cechy (wg ważności)"),
+  Blad = c(round(err_all_rf, 2), round(err_opt_rf, 2), round(err_opt_rf_fig, 2)),
+  CV_Blad = c(round(cv_all_rf, 2), round(cv_opt_rf, 2), round(cv_opt_rf_fig, 2)),
+  Boot_Blad = c(round(boot_all_rf, 2), round(boot_opt_rf, 2), round(boot_opt_rf_fig, 2))
+)
+
+df_rf_summary_t <- as.data.frame(t(df_rf_summary[, -1]))
+colnames(df_rf_summary_t) <- df_rf_summary$Zestaw_cech
+rownames(df_rf_summary_t) <- c(
+  "Pojedynczy podział [%]",
+  "Cross-validation [%]",
+  "Bootstrap [%]"
+)
+
+kable(df_rf_summary_t, 
+      caption = "Zestawienie ocen błędów klasyfikacji dla algorytmu Random Forest", 
+      align = 'c', booktabs = TRUE) %>%
+  kable_styling(latex_options = c('hold_position', 'striped', 'scale_down'))
+
+```
+
+Dla wyznaczonych optymalnych parametrów wielkości lasu (`ntree`) przeprowadzono ocenę zdolności klasyfikacyjnych algorytmu. Porównaniu poddano trzy konfiguracje danych: pełny zbiór (18 cech), wybrane cechy początkowe (3 cechy wg estymatorów gęstości) oraz zestaw 3 cech optymalnych dla lasu losowego (wytypowanych na podstawie wykresu \@ref(fig:wykres-waznosc-rf)). Wyniki zestawiono w tabeli \@ref(tab:rf-tabela).
+
+* Podobnie jak w przypadku poprzednich algorytmów, model zasilany kompletem 18 zmiennych uzyskuje najlepsze wyniki, osiągając błąd na poziomie 26.95\% dla pojedynczego podziału, 26.24\% dla *CV* oraz 25.94\% dla *Bootstrap*.
+
+* W przeciwieństwie do algorytmu *AdaBoost*, w przypadku lasu losowego trzy cechy wytypowane bezpośrednio przez ranking ważności okazały się lepsze we wszystkich scenariuszach od cech wybranych na podstawie estymatorów gęstości. W pojedynczym podziale błąd spadł z 39.72\% do 36.17\% (poprawa o blisko 3.5 punkta procentowego), w walidacji krzyżowej odnotowano spadek z 32.27\% do 29.79\%, natomiast w metodzie *Bootstrap* błąd zmalał z 34.00\% do 33.20\%.
+
+* W analizowanym przypadku pojedynczy podział danych okazał się bardziej podatny na wpływ losowego rozdzielenia na zbiory uczący i testowy. Walidacja krzyżowa dostarczała najbardziej stabilnych i jednocześnie najbardziej optymistycznych ocen błędu. Natomiast metoda *Bootstrap*, zgodnie z jej charakterystyką, zwracała nieco wyższe oszacowania błędu.
+
+
+## Porównanie metod zespołowych z pojedynczym drzewem decyzyjnym
+
+W celu jednoznacznej oceny zysku, jaki niesie ze sobą stosowanie zaawansowanych algorytmów klasyfikacji, przeprowadzono bezpośrednie porównanie uzyskanych wyników z modelem bazowym — pojedynczym drzewem decyzyjnym (omawianym na poprzednim sprawozdaniu). Jako kryterium porównawcze wybrano oceny błędu szacowane za pomocą metody *Bootstrap*. Porównano ze sobą dwie konfiguracje danych --- pełny (18) oraz zredukowany (3) zbiór zmiennych. 
+
+Istotnym elementem analizy jest wskaźnik względnej redukcji błędu klasyfikacji ($R$), obliczany według wzoru:
+$$R = \frac{\text{błąd}_{\text{poj. drzewo}} - \text{błąd}_{\text{algorytm}}}{\text{błąd}_{\text{poj. drzewo}}} \times 100\%$$
+\***Uwaga**: W przypadku algorytmów *AdaBoost* oraz *Random Forest* w kolumnie dotyczącej zbioru zredukowanego przedstawiono wyniki uzyskane dla podzbioru zmiennych, który zapewnił niższy błąd klasyfikacji spośród dwóch analizowanych podejść: podzbiorów wyznaczonych na podstawie wykresów ważności zmiennych oraz podzbiorów wyznaczonych z wykorzystaniem estymatorów gęstości.
+
+Zestawienie wartości błędów oraz wyznaczonego `R` przedstawiono w tabeli \@ref(tab:tabela-porownanie-koncowe).
+
+```{r, tabela-porownanie-koncowe}
+
+df_porownanie <- data.frame(
+  Model = c("Pojedyncze drzewo", 
+            "Bagging", 
+            "AdaBoost", 
+            "Random Forest"),
+  Pelny_Blad = c(32.19, 28.07, 24.70, 25.94),
+  Pelny_Redukcja = c("—", "12.80%", "23.27%", "19.41%"),
+  Zredagowany_Blad = c(38.13, 37.61, 34.88, 33.20),
+  Zredagowany_Redukcja = c("—", "1.36%", "8.52%", "13.01%")
+)
+
+kable(df_porownanie, 
+      col.names = c("Model klasyfikacyjny", 
+                    "Pełny zbiór (18 cech) [%]", 
+                    "Względna redukcja błędu (R)", 
+                    "Zbiór zredukowany (3 cechy)* [%]", 
+                    "Względna redukcja błędu (R)"),
+      caption = "Zestawienie ocen błędu (Bootstrap) oraz względnej redukcji błędu w stosunku do pojedynczego drzewa", 
+      align = c('l', 'c', 'c', 'c', 'c'), 
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c('hold_position', 'striped', 'scale_down'))
+
+```
+
+* Wszystkie trzy algorytmy (*Bagging*, *AdaBoost*, *Random Forest*) okazały się lepsze od pojedynczego drzewa decyzyjnego, niezależnie od wymiarowości przestrzeni cech.
+
+* W przypadku zasilania modeli kompletem 18 cech, bezkonkurencyjny okazał się algorytm *AdaBoost*, redukując błąd bazowy o blisko jedną czwartą (23.27\% względnego zysku). Drugie miejsce zajął las losowy (19.41\% redukcji błędu).
+
+* Sytuacja ulega zmianie w przestrzeni zredukowanej do 3 cech. Tutaj liderem jest *Random Forest*, który osiągnął najniższy błąd (33.20\%) i najwyższą względną redukcję błędu (13.01\%).
+
+* Algorytm *Bagging*, choć na pełnym zbiorze radzi sobie dobrze (12.80\% zysku), na zbiorze zredukowanym przyniósł symboliczny zysk (zaledwie 1.36\% względnej redukcji).
+
+
+# Metoda wektorów nośnych (SVM)
+
+Metoda wektorów nośnych (*SVM*) jest deterministyczną metodą klasyfikacji, której działanie opiera się na wyznaczeniu hiperpłaszczyzny maksymalizującej odległości (marginesu) pomiędzy klasami.
+
+
+## Optymalizacja parametrów `C` oraz `Kernel`
+
+```{r, wykres-parametr-svm, fig.pos='H', fig.cap='Wpływ funkcji jądrowej oraz parametru C na błąd klasyfikacji algorytmu SVM'}
+
+ggplot(df_svm_total, aes(x = cost, y = Blad, color = kernel, group = kernel)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2.5) +
+  scale_x_log10(breaks = C.vector) +
+  facet_wrap(~Zbior, scales = "free_y") +
+  scale_color_manual(
+    values = c('linear' = '#2c3e50', 'polynomial' = '#e67e22', 'radial' = '#9b59b6'),
+    labels = c('linear' = 'Liniowa', 'polynomial' = 'Wielomianowa (deg=3)', 'radial' = 'Radialna')
+  ) +
+  labs(
+    title = 'Optymalizacja parametrów algorytmu SVM',
+    subtitle = 'Błąd klasyfikacji na zbiorze testowym w zależności od jądra i kosztu C',
+    y = 'Błąd klasyfikacji (%)', 
+    x = 'Parametr kosztu C (skala logarytmiczna)', 
+    color = 'Funkcja jądrowa'
+  ) +
+  theme_light() +
+  theme(
+    legend.position = 'bottom',
+    plot.title = element_text(face = "bold", size = 14),
+    strip.text = element_text(face = "bold", size = 11, color = "black"),
+    strip.background = element_rect(fill = "#ecf0f1"),
+    axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 1),
+    axis.title.x = element_text(margin = margin(t = 15))
+  )
+
+```
+
+Na skuteczność klasyfikacji metodą SVM istotny wpływ ma kilka parametrów.\newline
+
+Pierwszym z nich jest parametr `kernel`, określający rodzaj funkcji jądrowej wykorzystywanej do transformacji danych do przestrzeni o wyższym wymiarze.
+
+Drugim istotnym parametrem jest parametr kosztu (`C`), który określa kompromis pomiędzy maksymalizacją marginesu a liczbą błędów klasyfikacji w zbiorze uczącym. Niskie wartości parametru dopuszczają większą liczbę błędnie sklasyfikowanych obserwacji, prowadząc do modelu o większej odporności na szum i niższej wariancji. Z kolei wysokie wartości powodują silniejsze karanie błędów klasyfikacji, co sprzyja dokładnemu dopasowaniu modelu do danych uczących, lecz jednocześnie zwiększa ryzyko przeuczenia.
+
+W przypadku jądra radialnego dodatkowym parametrem jest ($\gamma$), który określa zasięg wpływu pojedynczych obserwacji na kształt granicy decyzyjnej. Małe wartości prowadzą do gładkiej granicy decyzyjnej i bardziej uogólnionego modelu, natomiast duże wartości powodują, że wpływ pojedynczych obserwacji jest ograniczony do niewielkiego obszaru, co umożliwia tworzenie bardziej złożonych granic decyzyjnych, ale jednocześnie zwiększa ryzyko przeuczenia. W używanym pakiecie `e1071` domyślna wartość parametru $\gamma$ wynosi ($1/p$), gdzie ($p$) oznacza liczbę zmiennych objaśniających w zbiorze danych. W tej sekcji użyto domyślnej $\gamma$.
+
+
+Wykres \@ref(fig:wykres-parametr-svm) dostarcza wniosków na temat zachowania błędu klasyfikacji w zależności od wymiaru zbioru danych oraz parametrów:
+
+Zasilenie algorytmu pełnym zestawem zmiennych pozwala na uzyskanie niskich poziomów błędu (schodzących poniżej granicy 25\%), jednak dynamika poszczególnych jąder się różni:
+
+* Jądro liniowe (najskuteczniejsze dla małych wartości $C$): Dla skrajnie małego $C = 0.1$ marginesu jądro liniowe deklasuje konkurencję, osiągając błąd na poziomie ok. 26\%. 
+  Swoje globalne minimum osiąga dla $C = 1$ (ok. 20.5\%). Co istotne, dalsze zwiększanie `C` powoduje wzrost błędu aż do ok. 24\% dla $C = 50$. W 18-wymiarowej przestrzeni zbyt restrykcyjne dążenie do bezbłędnego rozdzielenia próby uczącej doprowadziło do utraty zdolności generalizacji.
+  
+* Jądro wielomianowe (stopnia 3): Wykazuje dla $C = 0.1$ generuje błąd rzędu 42\%. Krzywa błędu spada jednak najgwałtowniej, osiągając optimum przy $C = 5.0$ (ok. 21\%), po czym jej jakość ponownie się pogarsza.
+
+* Jądro radialne, podobnie jak wielomianowe, zaczyna wysoko (ok. 40\% dla $C = 0.1$), lecz wykazuje najbardziej stabilny spadkek. Jądro osiąga globalne minimum całego eksperymentu dla $C = 50.0$ (ok. 19.8\%). Dopiero przy $C = 100.0$ błąd zaczyna nieznacznie wzrastać.
+
+
+Redukcja przestrzeni informacyjnej do zaledwie 3 zmiennych spowodowała przesunięcie całego pasma błędu w górę (w przedział od 35\% do ponad 55\%), zmieniając hierarchię efektywności funkcji jądrowych:
+
+* Jądro radialne, w przeciwieństwie do pozostałych konfiguracji, jako jedyne potrafiło podjąć skuteczną walkę z ograniczoną przestrzenią cech. Rozpoczynając od błędu ok. 45\% ($C = 0.1$), wykazuje stopniową poprawę wraz ze wzrostem kosztu, osiągając swoje optimum dla $C = 100.0$ z wynikiem ok. 35\%. 
+
+* Jądro liniowe wykazało całkowitą niewydolność. Przebieg krzywej jest niemal płaski i oscyluje wokół bardzo wysokiego błędu 39\%–42\%.
+
+* Jądro wielomianowe (stopnia 3), podobnie jak na pełnym zbiorze, startuje z fatalnego poziomu (ok. 55\% błędu), po czym stabilizuje się na poziomie ok. 41\% dla $C \ge 5.0$, oferując tylko minimalny zysk względem prostszego jądra liniowego.
+
+Na podstawie uzyskanych wyników do dalszych etapów analizy przyjęto konfiguracje modelu zapewniające najniższą wartość błędu. Dla pełnego zbioru danych zastosowano jądro radialne oraz parametr kosztu $C=50$. Natomiast dla zredukowanego zbioru wybrano jądro radialne (RBF) z parametrem kosztu $C=100$.
+
+## Optymalizacja parametru `gamma` dla jądra radialnego
+
+```{r, wykres-tuning-rbf, fig.pos='H', fig.cap='Zależność parametrów C oraz gamma i ich wpływ na błąd klasyfikacji jądra radialnego'}
+
+ggplot(df_rbf_total, aes(x = gamma, y = Blad, color = as.factor(cost), group = cost)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 2) +
+  scale_x_log10(breaks = gamma_grid) +
+  facet_wrap(~Zbior, scales = "free_y") +
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    title = 'Dostrojenie parametrów C oraz gamma dla jądra radialnego',
+    subtitle = 'Analiza błędu na zbiorze testowym',
+    y = 'Błąd klasyfikacji (%)',
+    x = 'Parametr gamma (skala logarytmiczna)',
+    color = 'Koszt C'
+  ) +
+  theme_light() +
+  theme(
+    legend.position = 'bottom',
+    plot.title = element_text(face = "bold", size = 14),
+    strip.text = element_text(face = "bold", size = 11, color = "black"),
+    strip.background = element_rect(fill = "#ecf0f1"),
+    axis.text.x = element_text(angle = 45, vjust = 0.5, hjust = 1),
+    axis.title.x = element_text(margin = margin(t = 15))
+  )
+
+```
+
+W przypadku jądra radialnego kluczem do wykorzystania pełnego potencjału *SVM* jest jednoczesne zbalansowanie parametru kosztu $C$ oraz szerokości jądra $\gamma$. Wyniki poszukiwań optymalnej kombinacji tych parametrów zaprezentowano na wykresie \@ref(fig:wykres-tuning-rbf).
+
+* **Pełny zbiór danych:**
+  Dla niskich $\gamma$ oraz niskiego kosztu $C = 0.1$ błąd wynosi aż 75\%, a dla najwyższych wartości $C$ oscyluje wokół 23--27\%. Punkt optymalny dla pełnego zbioru danych (który jest globalnym minimum) zachodzi dla $\gamma = 0.010$, gdzie   najlepsze rezultaty osiągają modele o wysokim koszcie: $C = 50$ (błąd ok. 17.5\%) oraz $C = 100$ (błąd ok. 18.5\%). Świadczy to o tym, że w przestrzeni 18 cech optymalna granica jest relatywnie łagodna (niska wartość $\gamma$), ale       wymaga dużego $C$, który surowo karze pomyłki na zbiorze uczącym.
+
+  Dla wysokich $\gamma > 0.1$): następuje dość gwałtowny wzrost błędu dla wszystkich wartości kosztu. Dla $C = 0.1$ oraz błąd gwałtownie osiąga krytyczny pułap 75\%, a dla pozostałych linii (w tym $C=50$ i $C=100$) błąd szybuje w okolice   55--58\%.
+
+* **Zawężony zbiór danych:**
+  Następuje tutaj odwrócenie trendu w stosunku do pełnego zbioru zmiennych. Zwiększanie parametru $\gamma$ od wartości 0.001 aż do 1.000 skutkuje monotonicznym spadkiem błędu dla każdej testowanej wartości kosztu $C$. Dopiero przy          skrajnej wartości $\gamma = 5$ błąd zaczyna ponownie wzrastać dla wyższych wartości kosztu. Najlepsze wyniki osiągane są w $\gamma = 1$ dla dla $C = 100$ (błąd ok. 32\%).
+
+W oparciu o zaobserwowane wyniki, w końcowej tabeli porównawczej uwzględniono wyniki algorytmu *SVM* dla następujących parametrów optymalnych:\newline
+Dla pełnego zbioru (18 cech) --- jądro radialne, $C = 50$, $\gamma = 0.010$.\newline
+Dla zbioru zredukowanego (3 cechy) --- jądro radialne, $C = 100$, $\gamma = 1.000$.
+
+## Analiza błędu klasyfikacji
+
+
+```{r, svm-tabela-all}
+
+kable(df_svm_full, 
+      col.names = c("Metoda estymacji błędu", 
+                    paste0("Optymalny koszt (C=", opt_C_all, ", gamma domyślna)"), 
+                    paste0("Pełna optymalizacja (C=", opt_C_all, ", gamma=", opt_gamma_all, ")")),
+      caption = "Wpływu dostrojenia parametru gamma na pełnym zbiorze (18 cech)", 
+      align = c('l', 'c', 'c'), booktabs = TRUE) %>%
+  kable_styling(latex_options = c('hold_position', 'striped', 'scale_down'))
+```
+
+W tabeli \@ref(tab:svm-tabela-all) przedstawiono wyniki dla pełnego zbioru zmiennych.
+
+Na pierwszy rzut oka model z domyślną gammą i kosztem $C=50$ osiągnął spektakularny, najniższy błąd w walidacji krzyżowej (15.96\%). Jednak te same parametry na pojedynczym podziale (19.86\%) oraz w metodzie *Bootstrap* (19.90\%) radzą sobie zauważalnie gorzej. Świadczy to o niestabilności modelu --- domyślna gamma tworzyła granice decyzyjne, które szczęściliw w niektórych podziałach *CV* dawały świetny wynik.
+
+Ręczne obniżenie parametru $\gamma$ do poziomu 0.01 spowodowało, że wyniki stały się stabilne i spójne: pojedynczy podział (17.73\%), *Cross-validation* (17.73\%) oraz *Bootstrap* (18.44\%).
+
+Choć straciliśmy 1.77 punktu procentowego w *CV*, pełna optymalizacja dostarczyła model bardziej powtarzalny.
+
+```{r, svm-tabela-opt}
+
+kable(df_svm_reduced, 
+      col.names = c("Metoda estymacji błędu", 
+                    paste0("Optymalny koszt (C=", opt_C_opt, ", gamma domyślna)"), 
+                    paste0("Pełna optymalizacja (C=", opt_C_opt, ", gamma=", opt_gamma_opt, ")")),
+      caption = "Wpływu dostrojenia parametru gamma na zbiorze zredukowanym (3 cechy)", 
+      align = c('l', 'c', 'c'), booktabs = TRUE) %>%
+  kable_styling(latex_options = c('hold_position', 'striped', 'scale_down'))
+```
+
+W tabeli \@ref(tab:svm-tabela-opt) przedstawiono wyniki dla zredukowanego zbioru zmiennych (3 cechy). Wyniki modeli z domyślną gammą oraz zoptymalizowaną ($\gamma = 1$) okazały się bardzo zbliżone.
+
+Pełna optymalizacja przyniosła lekką poprawę w pojedynczym podziale (spadek z 33.69\% do 31.91\%), podczas gdy błędy *CV* (30.50\% vs 30.85\%) oraz *Bootstrap* (32.41\% vs 32.97\%) wskazują minimalnie na korzyść domyślnej gammy.
+
+Przeprowadzone obliczenia pokazują, że optymalizacja parametru $\gamma$ ma kluczowe znaczenie w przestrzeniach wielowymiarowych (18 cech). W przestrzeniach o niskiej wymiarowości (3 cechy) rola parametru $\gamma$ maleje.
+
+# Podsumowanie wyników
+
+```{r, finalne-zestawienie-metod}
+
+kable(df_ultimate, 
+      col.names = c("Algorytm/Model", "Pełny zbiór (18 cech) [%]", "Zbiór zredukowany (3 cechy) [%]"),
+      caption = "Globalne podsumowanie błędu Bootstrap dla wszystkich badanych metod klasyfikacji", 
+      align = c('l', 'c', 'c'), booktabs = TRUE) %>%
+  kable_styling(latex_options = c('hold_position', 'striped')) %>%
+  row_spec(7, bold = TRUE, background = "#e8f8f5")
+
+```
+
+W celu ostatecznej oceny wszystkich omawianych metod klasyfikacji (również z listy 3), zestawieno oceny błędu uzyskanych za pomocą metody *Bootstrap* (tabela \@ref(tab:finalne-zestawienie-metod)).
+
+* **Naiwny Bayes --- 54.84%**
+  Algorytm ten zanotował zdecydowanie najgorszy wynik, ocierający się o losowe zgadywanie. Jest to bezpośredni dowód na to, że cechy opisujące sylwetki pojazdów są ze sobą skorelowane. Naruszenie fundamentalnego założenia metody o niezależności cech całkowicie pozbawiło ten model zdolności predykcyjnych.
+  
+* **Drzewa pojedyncze i lasy --- 32.19%** 
+  Pojedyncze drzewa radzą sobie przeciętnie z uwagi na skłonność do przeuczania i tworzenie sztywnych granic decyzyjnych. Przejście do algorytmów zaawansowanych przynosi systematyczną poprawę:         *Bagging* redukuje błąd do 28.07\%, *Random Forest* osiąga 25.94\%, a sekwencyjny *AdaBoost* wyciska z tej architektury maksimum, schodząc do poziomu 24.70\%.
+  
+* **k-NN --- 30.57%**
+  Algorytm k-NN okazał się skuteczniejszy od pojedynczego drzewa decyzyjnego. Oznacza to, że podobieństwo euklidesowe między obserwacjami opisanymi przez 18 cech dobrze wspiera proces klasyfikacji.    Jednocześnie najlepsze wyniki nadal uzyskały metody uczenia zespołowego.
+  
+* **SVM --- 18.44%**
+  Metoda Wektorów Nośnych z zoptymalizowanym jądrem radialnym zdeklasowała rywali. Wynik 18.44\% jest o ponad 6 punktów procentowych lepszy od najlepszego algorytmu bazującego na drzewach              (*AdaBoost*) i o ponad 12 punktów procentowych lepszy od *k-NN*.
+
+Ograniczenie przestrzeni do 3 cech (prawa kolumna tabeli) wywołało gwałtowny, systematyczny wzrost błędu dla każdego badanego algorytmu, co potwierdza krytyczną utratę informacji o geometrii pojazdów.
+
+* *SVM* utrzymuje pozycję lidera. Mimo deficytu informacji, w pełni zoptymalizowany model *SVM* obronił pierwsze miejsce na podium, osiągając najniższy błąd równy 32.41\%.
+  
+* Przetasowanie w metodach uczenia zespołowego: W małej przestrzeni 3 cech algorytm *Random Forest* (33.20\%) okazał się skuteczniejszy niż *AdaBoost* (34.88\%). Dla zbioru zredukowanego las losowy    okazał się skuteczniejszy od boostingu. Wyniki wskazują, że losowy dobór cech lepiej ograniczał ryzyko przeuczenia, podczas gdy boosting wykazywał większą skłonność do nadmiernego dopasowania       modelu do danych uczących.
+
+* *k-NN* (36.46\%), *Bagging* (37.61\%) oraz pojedyncze drzewo (38.13\%) osiągnęły bardzo zbliżone, wysokie poziomy błędu. *Naiwny Bayes* utrzymał status najsłabszego modelu, pogarszając swój wynik aż do poziomu 61.67\%.
+
+
+Zbiór danych `Vehicle` wymaga stosowania metod odpornych na silne współzależności liniowe i nieliniowe zmiennych objaśniających (jak *SVM* lub *Random Forest*). Algorytmy opierające się na założeniu o niezależności (*Naiwny Bayes*) są w tym scenariuszu bezużyteczne.
+
+Dla zredukowanego wymiaru cech do 3 zmiennych żaden algorytm nie jest w stanie zejść poniżej granicy ok. 32% błędu. Świadczy to o tym, że ekstrakcja cech usunęła kluczowe informacje różnicujące klasy.
